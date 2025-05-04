@@ -9,5 +9,16 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "description": ""
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Aysuliu/FlixFluentServer.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Aysuliu/FlixFluentServer/issues"
+  },
+  "homepage": "https://github.com/Aysuliu/FlixFluentServer#readme",
+  "description": "",
+  "dependencies": {
+    "express": "^5.1.0"
+  }
 }
