@@ -58,3 +58,46 @@ app.get('/api/translate', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
+
+// Add to your server.js file:
+const { OpenAI } = require('openai');
+
+// Initialize OpenAI client
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY, // Set this in your environment variables
+});
+
+// Add this new endpoint to your Express server
+app.get('/api/translate-openai', async (req, res) => {
+  const word = req.query.word;
+  
+  if (!word) {
+    return res.status(400).json({ error: 'No word provided' });
+  }
+  
+  try {
+    const response = await openai.chat.completions.create({
+      model: "gpt-4o", // or any other model you prefer
+      messages: [
+        {
+          role: "system",
+          content: "You are a Korean-English translator. Provide translations for Korean words with pronunciation, part of speech, and example sentences. Format the response as JSON with properties: translatedText, pronunciation, partOfSpeech, and examples (array of {korean, english} pairs)."
+        },
+        {
+          role: "user",
+          content: `Translate this Korean word or phrase: "${word}"`
+        }
+      ],
+      response_format: { type: "json_object" }
+    });
+    
+    // Parse the JSON from the response
+    const translation = JSON.parse(response.choices[0].message.content);
+    
+    res.json({ translation });
+  } catch (error) {
+    console.error('OpenAI API error:', error);
+    res.status(500).json({ error: 'Error translating word with OpenAI' });
+  }
+});
+
