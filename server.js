@@ -1,103 +1,163 @@
 const express = require('express');
 const cors = require('cors');
-const { getSubtitles } = require('youtube-caption-extractor');
+const { YoutubeTranscript } = require('youtube-transcript');
+const { OpenAI } = require('openai');
+const axios = require('axios');
+
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Enable CORS for your frontend domain
-app.use(cors({
-  origin: '*', // Change this to your frontend URL in production
-  methods: ['GET', 'POST']
-}));
-
-// Basic route to test server
-app.get('/', (req, res) => {
-  res.send('YouTube Subtitle Proxy Server is running');
+// Initialize OpenAI with your API key
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY // Make sure to set this environment variable
 });
 
-// Route to get subtitles
-app.get('/api/subtitles', async (req, res) => {
-  const { videoId, lang = 'ko' } = req.query;
-  
-  if (!videoId) {
-    return res.status(400).json({ error: 'Missing videoId parameter' });
-  }
-  
+// Enable CORS for all routes
+app.use(cors());
+
+// Parse JSON request bodies
+app.use(express.json());
+
+// Health check endpoint
+app.get('/', (req, res) => {
+  res.send('FlixFluent Proxy Server is running');
+});
+
+// Endpoint to get available subtitle languages for a video
+app.get('/api/subtitle-languages', async (req, res) => {
   try {
-    const subtitles = await getSubtitles({ videoID: videoId, lang });
-    res.json({ subtitles });
+    const { videoId } = req.query;
+    
+    if (!videoId) {
+      return res.status(400).json({ error: 'Video ID is required' });
+    }
+
+    // Get available languages for the video
+    const availableLanguages = await YoutubeTranscript.listLanguages(videoId);
+    
+    // Extract language codes
+    const languages = availableLanguages.map(lang => lang.languageCode);
+    
+    console.log(`Found ${languages.length} subtitle languages for video ${videoId}`);
+    
+    return res.json({ 
+      videoId, 
+      languages 
+    });
+  } catch (error) {
+    console.error('Error fetching subtitle languages:', error);
+    return res.status(500).json({ 
+      error: 'Failed to fetch subtitle languages',
+      message: error.message
+    });
+  }
+});
+
+// Endpoint to fetch subtitles for a video
+app.get('/api/subtitles', async (req, res) => {
+  try {
+    const { videoId, lang } = req.query;
+    
+    if (!videoId) {
+      return res.status(400).json({ error: 'Video ID is required' });
+    }
+
+    console.log(`Fetching subtitles for video ${videoId} in language ${lang || 'default'}`);
+    
+    // Get transcript options
+    const options = {};
+    if (lang && lang !== 'auto') {
+      options.lang = lang;
+    }
+
+    // Fetch the transcript
+    const transcript = await YoutubeTranscript.fetchTranscript(videoId, options);
+    
+    if (!transcript || transcript.length === 0) {
+      return res.status(404).json({ error: 'No subtitles found for this video' });
+    }
+    
+    return res.json({ 
+      videoId, 
+      language: lang || 'auto',
+      subtitles: transcript 
+    });
   } catch (error) {
     console.error('Error fetching subtitles:', error);
-    res.status(500).json({ error: error.message || 'Failed to fetch subtitles' });
+    return res.status(500).json({ 
+      error: 'Failed to fetch subtitles',
+      message: error.message
+    });
   }
 });
 
-// Simple translation endpoint (you'd integrate with a real translation API)
-app.get('/api/translate', async (req, res) => {
-  const { word } = req.query;
-  
-  if (!word) {
-    return res.status(400).json({ error: 'Missing word parameter' });
-  }
-  
-  // This is a mock implementation - replace with real translation API
-  res.json({
-    translation: {
-      translatedText: `Translation of "${word}"`,
-      pronunciation: `[Pronunciation of ${word}]`,
-      partOfSpeech: 'noun',
-      examples: [
-        { korean: `${word}는 중요합니다.`, english: `${word} is important.` },
-        { korean: `저는 ${word}를 좋아해요.`, english: `I like ${word}.` }
-      ]
-    }
-  });
-});
-
-// Start server
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
-
-// Add to your server.js file:
-const { OpenAI } = require('openai');
-
-// Initialize OpenAI client
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY, // Set this in your environment variables
-});
-
-// Add this new endpoint to your Express server
+// Endpoint to translate Korean text using OpenAI
 app.get('/api/translate-openai', async (req, res) => {
-  const word = req.query.word;
-  
-  if (!word) {
-    return res.status(400).json({ error: 'No word provided' });
-  }
-  
   try {
-    const response = await openai.chat.completions.create({
-      model: "gpt-4o", // or any other model you prefer
+    const { word } = req.query;
+    
+    if (!word) {
+      return res.status(400).json({ error: 'Word parameter is required' });
+    }
+
+    console.log(`Translating Korean word: "${word}" using OpenAI`);
+    
+    // Define the prompt
+    const prompt = `
+I want you to act as a Korean language teacher. I will provide a Korean word or phrase.
+Please provide:
+1. The English translation
+2. The pronunciation in romanized form (if applicable)
+3. The part of speech (noun, verb, adjective, etc.)
+4. 2-3 example sentences in both Korean and English that use this word
+
+Format your response as a JSON object with these properties:
+- translatedText: the English translation
+- pronunciation: romanized pronunciation 
+- partOfSpeech: part of speech
+- examples: array of objects with "korean" and "english" properties for example sentences
+
+The Korean word or phrase is: ${word}
+`;
+
+    // Call OpenAI API
+    const completion = await openai.chat.completions.create({
+      model: "gpt-3.5-turbo",
       messages: [
-        {
-          role: "system",
-          content: "You are a Korean-English translator. Provide translations for Korean words with pronunciation, part of speech, and example sentences. Format the response as JSON with properties: translatedText, pronunciation, partOfSpeech, and examples (array of {korean, english} pairs)."
-        },
-        {
-          role: "user",
-          content: `Translate this Korean word or phrase: "${word}"`
-        }
+        { role: "system", content: "You are a helpful Korean language teacher assistant." },
+        { role: "user", content: prompt }
       ],
       response_format: { type: "json_object" }
     });
+
+    // Extract and parse the JSON response
+    const responseText = completion.choices[0].message.content;
+    let translationData;
     
-    // Parse the JSON from the response
-    const translation = JSON.parse(response.choices[0].message.content);
+    try {
+      translationData = JSON.parse(responseText);
+    } catch (parseError) {
+      console.error('Error parsing OpenAI response:', parseError);
+      // Fallback to a basic response
+      translationData = {
+        translatedText: "Could not parse translation data",
+        pronunciation: "",
+        partOfSpeech: "",
+        examples: []
+      };
+    }
     
-    res.json({ translation });
+    return res.json({ translation: translationData });
   } catch (error) {
-    console.error('OpenAI API error:', error);
-    res.status(500).json({ error: 'Error translating word with OpenAI' });
+    console.error('Error translating with OpenAI:', error);
+    return res.status(500).json({ 
+      error: 'Failed to translate text',
+      message: error.message
+    });
   }
 });
 
+// Start the server
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
