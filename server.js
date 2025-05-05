@@ -1,8 +1,8 @@
 const express = require('express');
 const cors = require('cors');
-const { YoutubeTranscript } = require('youtube-transcript');
-const { OpenAI } = require('openai');
 const axios = require('axios');
+const { OpenAI } = require('openai');
+const xml2js = require('xml2js'); // You'll need to install this: npm install xml2js
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -32,17 +32,40 @@ app.get('/api/subtitle-languages', async (req, res) => {
       return res.status(400).json({ error: 'Video ID is required' });
     }
 
-    // Get available languages for the video
-    const availableLanguages = await YoutubeTranscript.listLanguages(videoId);
+    // Get the list of available languages for this video
+    const response = await axios.get(`https://www.youtube.com/api/timedtext?type=list&v=${videoId}`);
     
-    // Extract language codes
-    const languages = availableLanguages.map(lang => lang.languageCode);
+    // The response is in XML format, so we need to parse it
+    const parser = new xml2js.Parser({ explicitArray: false });
+    const result = await parser.parseStringPromise(response.data);
+    
+    let languages = [];
+    
+    // Check if there are any caption tracks
+    if (result && result.transcript_list && result.transcript_list.track) {
+      // If there's only one track, it will be an object, not an array
+      const tracks = Array.isArray(result.transcript_list.track) 
+        ? result.transcript_list.track 
+        : [result.transcript_list.track];
+      
+      languages = tracks.map(track => ({
+        languageCode: track.$.lang_code,
+        name: track.$.lang_original || track.$.lang_translated || track.$.lang_code
+      }));
+    }
+    
+    // Check specifically for English and Korean
+    const hasEnglish = languages.some(lang => lang.languageCode === 'en');
+    const hasKorean = languages.some(lang => lang.languageCode === 'ko');
     
     console.log(`Found ${languages.length} subtitle languages for video ${videoId}`);
+    console.log(`English available: ${hasEnglish}, Korean available: ${hasKorean}`);
     
     return res.json({ 
       videoId, 
-      languages 
+      languages: languages.map(lang => lang.languageCode),
+      hasEnglish,
+      hasKorean
     });
   } catch (error) {
     console.error('Error fetching subtitle languages:', error);
@@ -62,30 +85,108 @@ app.get('/api/subtitles', async (req, res) => {
       return res.status(400).json({ error: 'Video ID is required' });
     }
 
-    console.log(`Fetching subtitles for video ${videoId} in language ${lang || 'default'}`);
+    const langCode = lang || 'en';
+    console.log(`Fetching subtitles for video ${videoId} in language ${langCode}`);
     
-    // Get transcript options
-    const options = {};
-    if (lang && lang !== 'auto') {
-      options.lang = lang;
-    }
-
-    // Fetch the transcript
-    const transcript = await YoutubeTranscript.fetchTranscript(videoId, options);
+    // Fetch subtitles using the unofficial API
+    const response = await axios.get(`https://www.youtube.com/api/timedtext?lang=${langCode}&v=${videoId}`);
     
-    if (!transcript || transcript.length === 0) {
-      return res.status(404).json({ error: 'No subtitles found for this video' });
+    // Parse the XML response
+    const parser = new xml2js.Parser();
+    const result = await parser.parseStringPromise(response.data);
+    
+    if (!result || !result.transcript || !result.transcript.text) {
+      return res.status(404).json({ error: `No ${langCode} subtitles found for this video` });
     }
+    
+    // Convert the XML structure to our expected format
+    const subtitles = result.transcript.text.map(item => ({
+      start: parseFloat(item.$.start),
+      dur: parseFloat(item.$.dur),
+      text: item._ || ''
+    }));
     
     return res.json({ 
       videoId, 
-      language: lang || 'auto',
-      subtitles: transcript 
+      language: langCode,
+      subtitles: subtitles
     });
   } catch (error) {
     console.error('Error fetching subtitles:', error);
     return res.status(500).json({ 
       error: 'Failed to fetch subtitles',
+      message: error.message
+    });
+  }
+});
+
+// Endpoint to fetch both English and Korean subtitles simultaneously
+app.get('/api/dual-subtitles', async (req, res) => {
+  try {
+    const { videoId } = req.query;
+    
+    if (!videoId) {
+      return res.status(400).json({ error: 'Video ID is required' });
+    }
+
+    console.log(`Fetching both English and Korean subtitles for video ${videoId}`);
+    
+    // Fetch English subtitles
+    let englishSubtitles = [];
+    try {
+      const enResponse = await axios.get(`https://www.youtube.com/api/timedtext?lang=en&v=${videoId}`);
+      const parser = new xml2js.Parser();
+      const enResult = await parser.parseStringPromise(enResponse.data);
+      
+      if (enResult && enResult.transcript && enResult.transcript.text) {
+        englishSubtitles = enResult.transcript.text.map(item => ({
+          start: parseFloat(item.$.start),
+          dur: parseFloat(item.$.dur),
+          text: item._ || ''
+        }));
+      }
+    } catch (error) {
+      console.error('Error fetching English subtitles:', error);
+    }
+    
+    // Fetch Korean subtitles
+    let koreanSubtitles = [];
+    try {
+      const koResponse = await axios.get(`https://www.youtube.com/api/timedtext?lang=ko&v=${videoId}`);
+      const parser = new xml2js.Parser();
+      const koResult = await parser.parseStringPromise(koResponse.data);
+      
+      if (koResult && koResult.transcript && koResult.transcript.text) {
+        koreanSubtitles = koResult.transcript.text.map(item => ({
+          start: parseFloat(item.$.start),
+          dur: parseFloat(item.$.dur),
+          text: item._ || ''
+        }));
+      }
+    } catch (error) {
+      console.error('Error fetching Korean subtitles:', error);
+    }
+    
+    // If neither language has subtitles, return an error
+    if (englishSubtitles.length === 0 && koreanSubtitles.length === 0) {
+      return res.status(404).json({ error: 'No English or Korean subtitles found for this video' });
+    }
+    
+    return res.json({ 
+      videoId,
+      english: {
+        available: englishSubtitles.length > 0,
+        subtitles: englishSubtitles
+      },
+      korean: {
+        available: koreanSubtitles.length > 0,
+        subtitles: koreanSubtitles
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching dual subtitles:', error);
+    return res.status(500).json({ 
+      error: 'Failed to fetch dual subtitles',
       message: error.message
     });
   }
